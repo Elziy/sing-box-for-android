@@ -7,10 +7,15 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.text.format.Formatter
 import android.util.Log
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -25,8 +30,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.outlined.AdminPanelSettings
 import androidx.compose.material.icons.outlined.Autorenew
+import androidx.compose.material.icons.outlined.DeleteForever
+import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Language
@@ -41,9 +49,12 @@ import androidx.compose.material3.Badge
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -62,6 +73,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -71,13 +83,16 @@ import androidx.core.os.LocaleListCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.navigation.NavController
+import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.sfa.Application
 import io.nekohasekai.sfa.BuildConfig
 import io.nekohasekai.sfa.R
 import io.nekohasekai.sfa.compose.component.UpdateAvailableDialog
 import io.nekohasekai.sfa.compose.topbar.OverrideTopBar
 import io.nekohasekai.sfa.database.Settings
+import io.nekohasekai.sfa.ktx.clipboardText
 import io.nekohasekai.sfa.update.UpdateCheckException
+import io.nekohasekai.sfa.update.UpdateSource
 import io.nekohasekai.sfa.update.UpdateState
 import io.nekohasekai.sfa.update.UpdateTrack
 import io.nekohasekai.sfa.utils.HookStatusClient
@@ -88,10 +103,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.xmlpull.v1.XmlPullParser
+import java.io.File
 import java.util.Locale
 import android.provider.Settings as AndroidSettings
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun AppSettingsScreen(navController: NavController) {
     OverrideTopBar {
@@ -113,10 +129,12 @@ fun AppSettingsScreen(navController: NavController) {
     val hasUpdate by UpdateState.hasUpdate
     val updateInfo by UpdateState.updateInfo
     val isChecking by UpdateState.isChecking
+    var showSourceDialog by remember { mutableStateOf(false) }
+    var currentSource by remember { mutableStateOf(Settings.updateSource) }
     var showTrackDialog by remember { mutableStateOf(false) }
     var currentTrack by remember { mutableStateOf(Settings.updateTrack) }
     var checkUpdateEnabled by remember { mutableStateOf(Settings.checkUpdateEnabled) }
-    var showErrorDialog by remember { mutableStateOf<Int?>(null) }
+    var showErrorDialog by remember { mutableStateOf<String?>(null) }
 
     var silentInstallEnabled by remember { mutableStateOf(Settings.silentInstallEnabled) }
     var silentInstallMethod by remember { mutableStateOf(Settings.silentInstallMethod) }
@@ -132,6 +150,7 @@ fun AppSettingsScreen(navController: NavController) {
     var downloadJob by remember { mutableStateOf<Job?>(null) }
     var downloadError by remember { mutableStateOf<String?>(null) }
     var showUpdateAvailableDialog by remember { mutableStateOf(false) }
+    var showVersionMenu by remember { mutableStateOf(false) }
 
     var notificationEnabled by remember { mutableStateOf(true) }
     var dynamicNotification by remember { mutableStateOf(Settings.dynamicNotification) }
@@ -144,8 +163,22 @@ fun AppSettingsScreen(navController: NavController) {
         mutableStateOf(if (appLocales.isEmpty) "" else appLocales.toLanguageTags())
     }
 
+    var cacheSize by remember { mutableStateOf(0L) }
+    var cacheSizeText by remember { mutableStateOf("") }
+
+    fun refreshCacheSize() {
+        scope.launch(Dispatchers.IO) {
+            val size = calculateDirSize(context.cacheDir)
+            withContext(Dispatchers.Main) {
+                cacheSize = size
+                cacheSizeText = Formatter.formatFileSize(context, size)
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
         HookStatusClient.refresh()
+        refreshCacheSize()
     }
 
     // Re-check states when returning from background (e.g., after granting permission)
@@ -183,6 +216,21 @@ fun AppSettingsScreen(navController: NavController) {
         }
     }
 
+    if (showSourceDialog) {
+        UpdateSourceDialog(
+            currentSource = currentSource,
+            onSourceSelected = { source ->
+                currentSource = source
+                UpdateState.clear()
+                scope.launch(Dispatchers.IO) {
+                    Settings.updateSource = source
+                }
+                showSourceDialog = false
+            },
+            onDismiss = { showSourceDialog = false },
+        )
+    }
+
     if (showTrackDialog) {
         UpdateTrackDialog(
             currentTrack = currentTrack,
@@ -198,11 +246,11 @@ fun AppSettingsScreen(navController: NavController) {
         )
     }
 
-    showErrorDialog?.let { messageRes ->
+    showErrorDialog?.let { message ->
         AlertDialog(
             onDismissRequest = { showErrorDialog = null },
             title = { Text(stringResource(R.string.check_update)) },
-            text = { Text(stringResource(messageRes)) },
+            text = { Text(message) },
             confirmButton = {
                 TextButton(onClick = { showErrorDialog = null }) {
                     Text(stringResource(R.string.ok))
@@ -223,10 +271,22 @@ fun AppSettingsScreen(navController: NavController) {
                             color = MaterialTheme.colorScheme.error,
                         )
                     } else {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(stringResource(R.string.downloading))
+                        val progress by UpdateState.downloadProgress
+                        Column {
+                            if (progress != null) {
+                                Text("${stringResource(R.string.downloading)} ${(progress!! * 100).toInt()}%")
+                            } else {
+                                Text(stringResource(R.string.downloading))
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            if (progress != null) {
+                                LinearProgressIndicator(
+                                    progress = { progress!! },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            } else {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            }
                         }
                     }
                 }
@@ -238,6 +298,7 @@ fun AppSettingsScreen(navController: NavController) {
                         downloadJob = null
                         showDownloadDialog = false
                         downloadError = null
+                        UpdateState.downloadProgress.value = null
                     },
                 ) {
                     Text(stringResource(if (downloadError != null) R.string.ok else android.R.string.cancel))
@@ -381,39 +442,70 @@ fun AppSettingsScreen(navController: NavController) {
             ),
         ) {
             Column {
-                ListItem(
-                    headlineContent = {
-                        Text(
-                            stringResource(R.string.app_version_title),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                    },
-                    supportingContent = {
-                        Text(
-                            BuildConfig.VERSION_NAME,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    },
-                    leadingContent = {
-                        Icon(
-                            imageVector = Icons.Outlined.Info,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                    },
-                    trailingContent = {
-                        if (hasUpdate) {
-                            Badge(containerColor = MaterialTheme.colorScheme.primary) { Text("New") }
+                Box {
+                    ListItem(
+                        headlineContent = {
+                            Text(
+                                stringResource(R.string.app_version_title),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        },
+                        supportingContent = {
+                            Text(
+                                BuildConfig.VERSION_NAME,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        },
+                        leadingContent = {
+                            Icon(
+                                imageVector = Icons.Outlined.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
+                        trailingContent = {
+                            if (hasUpdate) {
+                                Badge(containerColor = MaterialTheme.colorScheme.primary) { Text("New") }
+                            }
+                        },
+                        modifier =
+                        Modifier
+                            .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                            .combinedClickable(
+                                onClick = {},
+                                onLongClick = { showVersionMenu = true },
+                            ),
+                        colors =
+                        ListItemDefaults.colors(
+                            containerColor = Color.Transparent,
+                        ),
+                    )
+                    Box(modifier = Modifier.align(Alignment.BottomEnd)) {
+                        DropdownMenu(
+                            expanded = showVersionMenu,
+                            onDismissRequest = { showVersionMenu = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.per_app_proxy_action_copy)) },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Filled.ContentCopy,
+                                        contentDescription = null,
+                                    )
+                                },
+                                onClick = {
+                                    clipboardText = BuildConfig.VERSION_NAME
+                                    Toast.makeText(
+                                        context,
+                                        R.string.copied_to_clipboard,
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                    showVersionMenu = false
+                                },
+                            )
                         }
-                    },
-                    modifier =
-                    Modifier
-                        .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)),
-                    colors =
-                    ListItemDefaults.colors(
-                        containerColor = Color.Transparent,
-                    ),
-                )
+                    }
+                }
 
                 ListItem(
                     headlineContent = {
@@ -440,13 +532,80 @@ fun AppSettingsScreen(navController: NavController) {
                     },
                     modifier =
                     Modifier
-                        .clip(RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp))
                         .clickable { showLanguageDialog = true },
                     colors =
                     ListItemDefaults.colors(
                         containerColor = Color.Transparent,
                     ),
                 )
+
+                ListItem(
+                    headlineContent = {
+                        Text(
+                            stringResource(R.string.cache_size),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                    },
+                    supportingContent = {
+                        if (cacheSizeText.isNotEmpty()) {
+                            Text(cacheSizeText, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    },
+                    leadingContent = {
+                        Icon(
+                            imageVector = Icons.Outlined.DeleteSweep,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    },
+                    modifier =
+                    Modifier
+                        .clip(
+                            if (cacheSize > 0L) {
+                                RoundedCornerShape(0.dp)
+                            } else {
+                                RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp)
+                            },
+                        ),
+                    colors =
+                    ListItemDefaults.colors(
+                        containerColor = Color.Transparent,
+                    ),
+                )
+
+                if (cacheSize > 0L) {
+                    ListItem(
+                        headlineContent = {
+                            Text(
+                                stringResource(R.string.clear_cache),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        },
+                        leadingContent = {
+                            Icon(
+                                imageVector = Icons.Outlined.DeleteForever,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
+                        modifier =
+                        Modifier
+                            .clip(RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp))
+                            .clickable {
+                                scope.launch(Dispatchers.IO) {
+                                    context.cacheDir?.listFiles()?.forEach { it.deleteRecursively() }
+                                    withContext(Dispatchers.Main) {
+                                        cacheSize = 0L
+                                        cacheSizeText = Formatter.formatFileSize(context, 0L)
+                                    }
+                                }
+                            },
+                        colors =
+                        ListItemDefaults.colors(
+                            containerColor = Color.Transparent,
+                        ),
+                    )
+                }
             }
         }
 
@@ -555,14 +714,21 @@ fun AppSettingsScreen(navController: NavController) {
             ),
         ) {
             Column {
+                val isFDroid = UpdateSource.fromString(currentSource) == UpdateSource.FDROID
                 val updateItemCount =
                     run {
                         var count = 0
-                        if (Vendor.supportsTrackSelection()) {
+                        if (Vendor.updateSources.size > 1) {
+                            count += 1
+                        }
+                        if (Vendor.hasCustomUpdate) {
+                            count += 1
+                        }
+                        if (isFDroid) {
                             count += 1
                         }
                         count += 1
-                        if (Vendor.supportsSilentInstall()) {
+                        if (Vendor.hasCustomUpdate) {
                             count += 1
                             if (silentInstallEnabled) {
                                 count += 1
@@ -574,7 +740,7 @@ fun AppSettingsScreen(navController: NavController) {
                                 }
                             }
                         }
-                        if (Vendor.supportsAutoUpdate()) {
+                        if (Vendor.hasCustomUpdate) {
                             count += 1
                         }
                         count
@@ -592,7 +758,39 @@ fun AppSettingsScreen(navController: NavController) {
                     }
                 }
 
-                if (Vendor.supportsTrackSelection()) {
+                if (Vendor.updateSources.size > 1) {
+                    ListItem(
+                        headlineContent = {
+                            Text(
+                                stringResource(R.string.update_source),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        },
+                        supportingContent = {
+                            val sourceName = when (UpdateSource.fromString(currentSource)) {
+                                UpdateSource.GITHUB -> stringResource(R.string.update_source_github)
+                                UpdateSource.FDROID -> stringResource(R.string.update_source_fdroid)
+                            }
+                            Text(sourceName, style = MaterialTheme.typography.bodyMedium)
+                        },
+                        leadingContent = {
+                            Icon(
+                                imageVector = Icons.Outlined.NewReleases,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
+                        modifier =
+                        updateItemModifier()
+                            .clickable { showSourceDialog = true },
+                        colors =
+                        ListItemDefaults.colors(
+                            containerColor = Color.Transparent,
+                        ),
+                    )
+                }
+
+                if (Vendor.hasCustomUpdate) {
                     ListItem(
                         headlineContent = {
                             Text(
@@ -601,9 +799,13 @@ fun AppSettingsScreen(navController: NavController) {
                             )
                         },
                         supportingContent = {
-                            val trackName = when (UpdateTrack.fromString(currentTrack)) {
-                                UpdateTrack.STABLE -> stringResource(R.string.update_track_stable)
-                                UpdateTrack.BETA -> stringResource(R.string.update_track_beta)
+                            val trackName = if (isFDroid) {
+                                stringResource(R.string.update_track_stable)
+                            } else {
+                                when (UpdateTrack.fromString(currentTrack)) {
+                                    UpdateTrack.STABLE -> stringResource(R.string.update_track_stable)
+                                    UpdateTrack.BETA -> stringResource(R.string.update_track_beta)
+                                }
                             }
                             Text(trackName, style = MaterialTheme.typography.bodyMedium)
                         },
@@ -615,8 +817,63 @@ fun AppSettingsScreen(navController: NavController) {
                             )
                         },
                         modifier =
+                        updateItemModifier().let {
+                            if (isFDroid) it.alpha(0.38f) else it.clickable { showTrackDialog = true }
+                        },
+                        colors =
+                        ListItemDefaults.colors(
+                            containerColor = Color.Transparent,
+                        ),
+                    )
+                }
+
+                if (isFDroid) {
+                    ListItem(
+                        headlineContent = {
+                            Text(
+                                stringResource(R.string.fdroid_mirror),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        },
+                        supportingContent = {
+                            val mirrorUrl = Settings.fdroidMirrorUrl
+                            val mirrorName = remember(mirrorUrl) {
+                                val iter = Libbox.getFDroidMirrors()
+                                var name: String? = null
+                                while (iter.hasNext()) {
+                                    val m = iter.next()
+                                    if (m.url == mirrorUrl) {
+                                        name = m.name
+                                        break
+                                    }
+                                }
+                                if (name == null) {
+                                    val customMirrors = Settings.fdroidCustomMirrors
+                                    for (entry in customMirrors) {
+                                        val parts = entry.split("|", limit = 2)
+                                        if (parts.size == 2 && parts[1] == mirrorUrl) {
+                                            name = parts[0]
+                                            break
+                                        }
+                                    }
+                                }
+                                name ?: mirrorUrl
+                            }
+                            Text(
+                                mirrorName,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        },
+                        leadingContent = {
+                            Icon(
+                                imageVector = Icons.Outlined.Speed,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        },
+                        modifier =
                         updateItemModifier()
-                            .clickable { showTrackDialog = true },
+                            .clickable { navController.navigate("settings/fdroid_mirror") },
                         colors =
                         ListItemDefaults.colors(
                             containerColor = Color.Transparent,
@@ -656,7 +913,7 @@ fun AppSettingsScreen(navController: NavController) {
                     ),
                 )
 
-                if (Vendor.supportsSilentInstall()) {
+                if (Vendor.hasCustomUpdate) {
                     ListItem(
                         headlineContent = {
                             Text(
@@ -836,7 +1093,7 @@ fun AppSettingsScreen(navController: NavController) {
                     }
                 }
 
-                if (Vendor.supportsAutoUpdate()) {
+                if (Vendor.hasCustomUpdate) {
                     ListItem(
                         headlineContent = {
                             Text(
@@ -940,15 +1197,17 @@ fun AppSettingsScreen(navController: NavController) {
                                         val result = Vendor.checkUpdateAsync()
                                         UpdateState.setUpdate(result)
                                         if (result == null) {
-                                            showErrorDialog = R.string.no_updates_available
+                                            showErrorDialog = context.getString(R.string.no_updates_available)
                                         } else {
                                             showUpdateAvailableDialog = true
                                         }
                                     } catch (_: UpdateCheckException.TrackNotSupported) {
                                         UpdateState.setUpdate(null)
-                                        showErrorDialog = R.string.update_track_not_supported
-                                    } catch (_: Exception) {
+                                        showErrorDialog = context.getString(R.string.update_track_not_supported)
+                                    } catch (e: Exception) {
+                                        Log.e("AppSettingsScreen", "checkUpdateAsync failed", e)
                                         UpdateState.setUpdate(null)
+                                        showErrorDialog = e.message
                                     }
                                 }
                                 UpdateState.isChecking.value = false
@@ -996,6 +1255,53 @@ fun AppSettingsScreen(navController: NavController) {
             }
         }
     }
+}
+
+@Composable
+private fun UpdateSourceDialog(
+    currentSource: String,
+    onSourceSelected: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sources = listOf(
+        "github" to stringResource(R.string.update_source_github),
+        "fdroid" to stringResource(R.string.update_source_fdroid),
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.update_source)) },
+        text = {
+            Column {
+                sources.forEach { (value, label) ->
+                    Row(
+                        modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onSourceSelected(value) }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = currentSource == value,
+                            onClick = { onSourceSelected(value) },
+                        )
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(android.R.string.cancel))
+            }
+        },
+    )
 }
 
 @Composable
@@ -1106,6 +1412,15 @@ private fun LanguageDialog(
             }
         },
     )
+}
+
+private fun calculateDirSize(dir: File?): Long {
+    if (dir == null || !dir.exists()) return 0
+    var size = 0L
+    dir.listFiles()?.forEach { file ->
+        size += if (file.isDirectory) calculateDirSize(file) else file.length()
+    }
+    return size
 }
 
 private fun getSupportedLocales(context: Context): List<Locale> {
